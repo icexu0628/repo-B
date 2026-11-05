@@ -1,0 +1,40 @@
+name: distribute-ai-rules
+run-name: distribute ${{ inputs.target_commit || github.sha }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target_commit:
+        description: "Retry: fixed commit to distribute (default: current HEAD)"
+        required: false
+      target_repos:
+        description: "Retry: comma-separated owner/repo list (default: all)"
+        required: false
+
+env:
+  TARGET_COMMIT: ${{ inputs.target_commit || github.sha }}
+  TARGET_REPOS: ${{ inputs.target_repos || vars.TARGET_REPOS || 'icexu0628/repo-A,icexu0628/repo-B' }}
+
+jobs:
+  distribute:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_COMMIT }}
+      - run: scripts/trigger-downstreams.sh "$TARGET_COMMIT" "https://github.com/$GITHUB_REPOSITORY.git" "$TARGET_REPOS"
+        env:
+          GH_TOKEN: ${{ secrets.DOWNSTREAM_DISPATCH_TOKEN }}
+
+  verify:
+    needs: distribute
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_COMMIT }}
+      - run: scripts/verify-distribution.sh "$TARGET_COMMIT" "$TARGET_REPOS" "${{ vars.VERIFY_TIMEOUT_MINUTES || 10 }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
