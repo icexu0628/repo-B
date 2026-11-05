@@ -1,0 +1,94 @@
+name: ai-rules-sync
+run-name: ${{ github.event_name == 'repository_dispatch' && format('ai-rules sync {0}', github.event.client_payload.commit) || format('PR #{0} gate', github.event.pull_request.number) }}
+
+on:
+  repository_dispatch:
+    types: [ai-rules-sync]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ai-rules-sync-${{ github.event_name == 'repository_dispatch' && 'dispatch' || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  sync-ai-rules:
+    if: github.event_name == 'repository_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.SYNC_BOT_TOKEN }}
+      AI_RULES_COMMIT: ${{ github.event.client_payload.commit }}
+      AI_RULES_REPOSITORY: ${{ github.event.client_payload.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_BOT_TOKEN }}
+      - run: |
+          set -eu
+          test -n "$AI_RULES_COMMIT"
+          synced=$(git show "origin/main:docs/common/.ai-rules-sync.json" 2>/dev/null | jq -r .sourceCommit || true)
+          if [ "$synced" = "$AI_RULES_COMMIT" ]; then
+            echo "Already synchronized: $AI_RULES_COMMIT"; exit 0
+          fi
+          branch="sync/ai-rules/$AI_RULES_COMMIT"
+          existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --base main --state open --json url -q '.[0].url')
+          if [ -n "$existing" ]; then
+            echo "Sync PR already open: $existing"; exit 0
+          fi
+          git config user.name "ai-rules-sync-bot"
+          git config user.email "ai-rules-sync-bot@users.noreply.github.com"
+          git checkout -B "$branch" origin/main
+          git remote add ai-rules "$AI_RULES_REPOSITORY"
+          git fetch --no-tags ai-rules "$AI_RULES_COMMIT"
+          git show "$AI_RULES_COMMIT:scripts/sync-subtree.sh" > /tmp/sync-subtree.sh
+          sh /tmp/sync-subtree.sh "$AI_RULES_REPOSITORY" "$AI_RULES_COMMIT"
+          git push origin "HEAD:$branch"
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
+            --title "chore(ai-rules): sync $AI_RULES_COMMIT" \
+            --body "Automated sync of $AI_RULES_REPOSITORY @ $AI_RULES_COMMIT into docs/common/."
+
+  check-ai-rules-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR: ${{ github.event.pull_request.number }}
+    steps:
+      - run: |
+          set -eu
+          files=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate -q '.[].filename')
+          test -n "$files"
+          if ! printf '%s\n' "$files" | grep -q '^docs/common/'; then
+            echo "Not a sync PR; no docs/common/ gate applied"; exit 0
+          fi
+          if printf '%s\n' "$files" | grep -qv '^docs/common/'; then
+            echo "Sync PR must only change docs/common/:" >&2
+            printf '%s\n' "$files" | grep -v '^docs/common/' >&2
+            exit 1
+          fi
+          author=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" -q .user.login)
+          test "$author" = "${{ vars.SYNC_BOT_USERNAME }}" || { echo "PR author $author is not the sync bot" >&2; exit 1; }
+          echo "$GITHUB_HEAD_REF" | grep -Eq '^sync/ai-rules/[0-9a-f]{40}$' || { echo "Unexpected head branch $GITHUB_HEAD_REF" >&2; exit 1; }
+          echo "docs/common/ gate passed"
+
+  merge-ai-rules-pr:
+    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'sync/ai-rules/')
+    needs: check-ai-rules-pr
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.SYNC_BOT_TOKEN }}
+      PR: ${{ github.event.pull_request.number }}
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - run: |
+          set -eu
+          read -r head base state <<EOF
+          $(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" -q '"\(.head.sha) \(.base.ref) \(.state)"')
+          EOF
+          test "$head" = "$EXPECTED_SHA" || { echo "Head moved: $head != $EXPECTED_SHA" >&2; exit 1; }
+          test "$base" = "main" && test "$state" = "open"
+          if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate -q '.[].filename' | grep -qv '^docs/common/'; then
+            echo "Refusing to merge: changes outside docs/common/" >&2; exit 1
+          fi
+          gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --merge --match-head-commit "$EXPECTED_SHA"
