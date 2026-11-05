@@ -1,5 +1,5 @@
 name: ai-rules-sync
-run-name: ${{ github.event_name == 'repository_dispatch' && format('ai-rules sync {0}', github.event.client_payload.commit) || format('PR #{0} gate', github.event.pull_request.number) }}
+run-name: "${{ github.event_name == 'repository_dispatch' && format('ai-rules sync {0}', github.event.client_payload.commit) || format('PR {0} gate', github.event.pull_request.number) }}"
 
 on:
   repository_dispatch:
