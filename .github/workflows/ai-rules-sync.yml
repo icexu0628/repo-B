@@ -27,23 +27,42 @@ jobs:
       - run: |
           set -eu
           test -n "$AI_RULES_COMMIT"
+          git remote add ai-rules "$AI_RULES_REPOSITORY"
+          git fetch --no-tags ai-rules "$AI_RULES_COMMIT"
           synced=$(git show "origin/main:docs/common/.ai-rules-sync.json" 2>/dev/null | jq -r .sourceCommit || true)
           if [ "$synced" = "$AI_RULES_COMMIT" ]; then
             echo "Already synchronized: $AI_RULES_COMMIT"; exit 0
           fi
-          branch="sync/ai-rules/$AI_RULES_COMMIT"
-          existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --base main --state open --json url -q '.[0].url')
-          if [ -n "$existing" ]; then
-            echo "Sync PR already open: $existing"; exit 0
+          if [ -n "$synced" ] && git fetch --no-tags ai-rules "$synced" && git merge-base --is-ancestor "$AI_RULES_COMMIT" "$synced"; then
+            echo "Superseded: main already at $synced, a descendant of $AI_RULES_COMMIT"; exit 0
           fi
+          branch="sync/ai-rules/$AI_RULES_COMMIT"
+          # Releases are linear on ai-rules/main: a newer open sync PR supersedes an older one.
+          gh pr list --repo "$GITHUB_REPOSITORY" --base main --state open --json number,headRefName,mergeable \
+            -q '.[] | select(.headRefName|startswith("sync/ai-rules/")) | "\(.number) \(.headRefName|ltrimstr("sync/ai-rules/")) \(.mergeable)"' \
+            | while read -r num other mergeable; do
+              if [ "$other" = "$AI_RULES_COMMIT" ]; then
+                if [ "$mergeable" = "CONFLICTING" ]; then
+                  gh pr close "$num" --repo "$GITHUB_REPOSITORY" --delete-branch --comment "Stale: conflicts with main; recreating from current main."
+                else
+                  echo "Sync PR already open: #$num"; echo "$num" > /tmp/stop
+                fi
+              elif git fetch --no-tags ai-rules "$other" && git merge-base --is-ancestor "$other" "$AI_RULES_COMMIT"; then
+                gh pr close "$num" --repo "$GITHUB_REPOSITORY" --delete-branch --comment "Superseded by sync of $AI_RULES_COMMIT."
+              elif git merge-base --is-ancestor "$AI_RULES_COMMIT" "$other"; then
+                echo "Superseded by open sync PR #$num ($other)"; echo "$num" > /tmp/stop
+              else
+                echo "Open sync PR #$num targets $other, which is not on the same line as $AI_RULES_COMMIT; manual intervention required" >&2
+                exit 1
+              fi
+            done
+          test -f /tmp/stop && exit 0
           git config user.name "ai-rules-sync-bot"
           git config user.email "ai-rules-sync-bot@users.noreply.github.com"
           git checkout -B "$branch" origin/main
-          git remote add ai-rules "$AI_RULES_REPOSITORY"
-          git fetch --no-tags ai-rules "$AI_RULES_COMMIT"
           git show "$AI_RULES_COMMIT:scripts/sync-subtree.sh" > /tmp/sync-subtree.sh
           sh /tmp/sync-subtree.sh "$AI_RULES_REPOSITORY" "$AI_RULES_COMMIT"
-          git push origin "HEAD:$branch"
+          git push --force origin "HEAD:$branch"
           gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
             --title "chore(ai-rules): sync $AI_RULES_COMMIT" \
             --body "Automated sync of $AI_RULES_REPOSITORY @ $AI_RULES_COMMIT into docs/common/."
