@@ -22,8 +22,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TARGET_COMMIT }}
       - run: scripts/trigger-downstreams.sh "$TARGET_COMMIT" "https://github.com/$GITHUB_REPOSITORY.git" "$TARGET_REPOS"
         env:
           GH_TOKEN: ${{ secrets.DOWNSTREAM_DISPATCH_TOKEN }}
@@ -34,7 +32,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TARGET_COMMIT }}
           fetch-depth: 0
       - run: scripts/verify-distribution.sh "$TARGET_COMMIT" "$TARGET_REPOS" "${{ vars.VERIFY_TIMEOUT_MINUTES || 10 }}"
         env:
